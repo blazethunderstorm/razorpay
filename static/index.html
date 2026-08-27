@@ -1,0 +1,666 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Khata — settlement reconciliation</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config={darkMode:['class','[data-theme="dark"]']}</script>
+<style>
+/* Palette roles. Light and dark are separately selected steps validated
+   against their own surface, not an automatic inversion. */
+.viz-root{
+  color-scheme:light;
+  --surface-1:#fcfcfb; --page:#f9f9f7;
+  --text-primary:#0b0b0b; --text-secondary:#52514e; --text-muted:#898781;
+  --grid:#e1e0d9; --axis:#c3c2b7;
+  --s-line:#2a78d6; --s-equiv:#1baf7a; --s-cash:#4a3aa7; --s-abstain:#008300;
+  --st-good:#0ca30c; --st-warning:#fab219; --st-serious:#ec835a; --st-critical:#d03b3b;
+  --ord-1:#86b6ef; --ord-2:#5598e7; --ord-3:#2a78d6; --ord-4:#1c5cab; --ord-5:#104281;
+}
+@media (prefers-color-scheme:dark){
+  :root:where(:not([data-theme="light"])) .viz-root{
+    color-scheme:dark;
+    --surface-1:#1a1a19; --page:#0d0d0d;
+    --text-primary:#ffffff; --text-secondary:#c3c2b7; --text-muted:#898781;
+    --grid:#2c2c2a; --axis:#383835;
+    --s-line:#3987e5; --s-equiv:#199e70; --s-cash:#9085e9; --s-abstain:#008300;
+    --ord-1:#9ec5f4; --ord-2:#6da7ec; --ord-3:#3987e5; --ord-4:#256abf; --ord-5:#184f95;
+  }
+}
+:root[data-theme="dark"] .viz-root{
+  color-scheme:dark;
+  --surface-1:#1a1a19; --page:#0d0d0d;
+  --text-primary:#ffffff; --text-secondary:#c3c2b7; --text-muted:#898781;
+  --grid:#2c2c2a; --axis:#383835;
+  --s-line:#3987e5; --s-equiv:#199e70; --s-cash:#9085e9; --s-abstain:#008300;
+  --ord-1:#9ec5f4; --ord-2:#6da7ec; --ord-3:#3987e5; --ord-4:#256abf; --ord-5:#184f95;
+}
+body{background:var(--page);color:var(--text-primary);
+  font-feature-settings:"tnum" 1,"cv05" 1;}
+.card{background:var(--surface-1);border:1px solid var(--grid);border-radius:12px}
+.muted{color:var(--text-muted)} .sec{color:var(--text-secondary)}
+.num{font-variant-numeric:tabular-nums}
+.seg{border-radius:4px}
+.tip{position:fixed;pointer-events:none;opacity:0;transition:opacity .09s;
+  background:var(--text-primary);color:var(--surface-1);font-size:11.5px;
+  padding:6px 9px;border-radius:7px;z-index:60;max-width:290px;line-height:1.45}
+.tip.on{opacity:1}
+.row-hit{cursor:pointer}
+.row-hit:hover{background:color-mix(in srgb,var(--grid) 45%,transparent)}
+details summary::-webkit-details-marker{display:none}
+</style>
+</head>
+<body class="viz-root antialiased">
+<div class="tip" id="tip"></div>
+
+<div class="max-w-[1240px] mx-auto px-6 py-8">
+
+  <!-- ── header ─────────────────────────────────────────────── -->
+  <header class="flex flex-wrap items-end justify-between gap-4 mb-7">
+    <div>
+      <h1 class="text-[26px] font-semibold tracking-tight leading-none">खाता · Khata</h1>
+      <p class="sec text-[13.5px] mt-1.5">
+        Settlement reconciliation, scored against held-out ground truth.
+      </p>
+    </div>
+    <div class="flex items-end gap-2.5 text-[12.5px]">
+      <label class="flex flex-col gap-1">
+        <span class="muted text-[11px] uppercase tracking-wide">Seed</span>
+        <input id="seed" type="number" value="42" class="card px-2.5 py-1.5 w-[86px] num bg-transparent">
+      </label>
+      <label class="flex flex-col gap-1">
+        <span class="muted text-[11px] uppercase tracking-wide">Payments</span>
+        <input id="payments" type="number" value="600" step="100" class="card px-2.5 py-1.5 w-[92px] num bg-transparent">
+      </label>
+      <label class="flex flex-col gap-1">
+        <span class="muted text-[11px] uppercase tracking-wide">API budget</span>
+        <input id="gateway" type="number" value="40" min="0" step="10"
+               class="card px-2.5 py-1.5 w-[80px] num bg-transparent"
+               title="Max settlement-recon API calls. Set 0 to see the fully offline result.">
+      </label>
+      <label class="card px-3 py-1.5 flex items-center gap-2 cursor-pointer select-none">
+        <input id="llm" type="checkbox" class="accent-[var(--s-line)]">
+        <span>Tier&nbsp;3 adjudicator</span>
+      </label>
+      <button id="go" class="px-4 py-1.5 rounded-lg font-medium text-white"
+              style="background:var(--s-line)">Reconcile</button>
+      <button id="theme" class="card px-3 py-1.5" title="Toggle theme">◐</button>
+    </div>
+  </header>
+
+  <div id="loading" class="hidden card p-8 text-center sec text-sm">
+    Reconciling… <span class="muted" id="loadnote"></span>
+  </div>
+  <div id="err" class="hidden card p-5 text-sm" style="border-color:var(--st-critical)"></div>
+
+  <main id="app" class="hidden space-y-5">
+
+    <!-- ── batch strip ────────────────────────────────────────── -->
+    <div class="card px-5 py-3 flex flex-wrap gap-x-7 gap-y-1.5 text-[12.5px]" id="strip"></div>
+
+    <!-- ── KPI tiles ──────────────────────────────────────────── -->
+    <section class="grid grid-cols-2 md:grid-cols-5 gap-3" id="kpis"></section>
+
+    <!-- ── outcome bar + funnel ───────────────────────────────── -->
+    <section class="grid lg:grid-cols-2 gap-5">
+      <div class="card p-5">
+        <h2 class="text-[15px] font-semibold">Where every credit landed</h2>
+        <p class="muted text-[12px] mt-0.5 mb-4">
+          All <span id="ob-total"></span> bank credits. Segments sum to the whole batch.
+        </p>
+        <div id="outcomebar" class="flex gap-[2px] h-11 mb-3.5"></div>
+        <div id="outcomelegend" class="grid grid-cols-2 gap-x-4 gap-y-2 text-[12px]"></div>
+      </div>
+
+      <div class="card p-5">
+        <h2 class="text-[15px] font-semibold">Tier funnel</h2>
+        <p class="muted text-[12px] mt-0.5 mb-4">
+          Cheapest evidence first. A token is only spent at Tier&nbsp;3.
+        </p>
+        <div id="funnel" class="space-y-2.5"></div>
+      </div>
+    </section>
+
+    <!-- ── per-scenario ───────────────────────────────────────── -->
+    <section class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-2">
+        <h2 class="text-[15px] font-semibold">Recall by break class</h2>
+        <p class="muted text-[12px]">
+          Stratified generation — every failure class is exercised, none is a sample of one.
+        </p>
+      </div>
+      <div class="overflow-x-auto mt-4">
+        <table class="w-full text-[12.5px] num">
+          <thead>
+            <tr class="muted text-[11px] uppercase tracking-wide text-left"
+                style="border-bottom:1px solid var(--grid)">
+              <th class="py-2 pr-3 font-medium">Break class</th>
+              <th class="py-2 px-2 font-medium text-right">n</th>
+              <th class="py-2 px-2 font-medium text-right">Line</th>
+              <th class="py-2 px-2 font-medium text-right">Equiv</th>
+              <th class="py-2 px-2 font-medium text-right">Cash</th>
+              <th class="py-2 px-2 font-medium text-right">Abstain</th>
+              <th class="py-2 px-2 font-medium text-right">Miss</th>
+              <th class="py-2 px-2 font-medium text-right">FP</th>
+              <th class="py-2 pl-3 font-medium w-[210px]">Outcome mix · cash recall</th>
+            </tr>
+          </thead>
+          <tbody id="scenarios"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ── exception queue ────────────────────────────────────── -->
+    <section class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-2">
+        <h2 class="text-[15px] font-semibold">Exception queue</h2>
+        <p class="muted text-[12px]">
+          What the engine refused to touch — typed, owned, and actionable.
+        </p>
+      </div>
+      <div id="exceptions" class="mt-4 space-y-2.5"></div>
+    </section>
+
+    <!-- ── review queue ───────────────────────────────────────── -->
+    <section class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-2">
+        <h2 class="text-[15px] font-semibold">Review queue</h2>
+        <p class="muted text-[12px]">
+          Clear an exception by hand. Kept beside the benchmark, never inside it —
+          the metrics above do not move when you resolve something here.
+        </p>
+      </div>
+      <div id="review" class="mt-4 space-y-2.5"></div>
+    </section>
+
+    <!-- ── cash forecast ──────────────────────────────────────── -->
+    <section class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-2">
+        <h2 class="text-[15px] font-semibold">Cash forecast</h2>
+        <p class="muted text-[12px]">
+          Captured but not yet paid out, at T+2. Arithmetic, not a prediction.
+        </p>
+      </div>
+      <div id="forecast" class="mt-4"></div>
+    </section>
+
+    <!-- ── credit explorer ────────────────────────────────────── -->
+    <section class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-3">
+        <div>
+          <h2 class="text-[15px] font-semibold">Audit trail</h2>
+          <p class="muted text-[12px] mt-0.5">
+            Every credit, every tier it passed through, and why each one declined.
+            Click a row to expand.
+          </p>
+        </div>
+        <div class="flex gap-2 items-center text-[12px]">
+          <input id="filter" placeholder="filter by id, tier, scenario, reason…"
+                 class="card px-2.5 py-1.5 w-[260px] bg-transparent">
+          <select id="only" class="card px-2.5 py-1.5 bg-transparent">
+            <option value="">all outcomes</option>
+            <option value="line_matched">line matched</option>
+            <option value="line_equivalent">line equivalent</option>
+            <option value="cash_matched">cash matched</option>
+            <option value="correct_abstention">correct abstention</option>
+            <option value="missed">missed</option>
+            <option value="false_match">false match</option>
+          </select>
+        </div>
+      </div>
+      <div class="overflow-auto mt-4 max-h-[560px]">
+        <table class="w-full text-[12.5px]">
+          <thead class="sticky top-0" style="background:var(--surface-1)">
+            <tr class="muted text-[11px] uppercase tracking-wide text-left"
+                style="border-bottom:1px solid var(--grid)">
+              <th class="py-2 pr-3 font-medium">Credit</th>
+              <th class="py-2 px-2 font-medium">Date</th>
+              <th class="py-2 px-2 font-medium text-right">Amount</th>
+              <th class="py-2 px-2 font-medium">Break class</th>
+              <th class="py-2 px-2 font-medium">Resolved by</th>
+              <th class="py-2 px-2 font-medium text-right">Conf</th>
+              <th class="py-2 pl-2 font-medium">Outcome</th>
+            </tr>
+          </thead>
+          <tbody id="credits"></tbody>
+        </table>
+      </div>
+      <p class="muted text-[11.5px] mt-3" id="creditcount"></p>
+    </section>
+
+    <!-- ── ledger ─────────────────────────────────────────────── -->
+    <section class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-2">
+        <h2 class="text-[15px] font-semibold">Ledger</h2>
+        <p class="muted text-[12px]">
+          Double entry. Asserted after every batch — an imbalance voids the run.
+        </p>
+      </div>
+      <div id="ledger" class="mt-4 grid md:grid-cols-2 gap-x-8 gap-y-1.5 text-[12.5px] num"></div>
+    </section>
+
+    <p class="muted text-[11.5px] pt-1 pb-6" id="footnote"></p>
+  </main>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const tip = $('#tip');
+function showTip(e, html){ tip.innerHTML = html; tip.classList.add('on');
+  const p = 14, w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = e.clientX + p, y = e.clientY + p;
+  if (x + w > innerWidth - 8) x = e.clientX - w - p;
+  if (y + h > innerHeight - 8) y = e.clientY - h - p;
+  tip.style.left = x + 'px'; tip.style.top = y + 'px'; }
+function hideTip(){ tip.classList.remove('on'); }
+function bindTip(el, html){
+  el.addEventListener('mousemove', e => showTip(e, html));
+  el.addEventListener('mouseleave', hideTip);
+}
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const pctv = x => (x*100).toFixed(1) + '%';
+
+// Outcome classes. Ordered best -> worst; the two failure states use the
+// reserved status colours and always ship with a label, never colour alone.
+const OUTCOMES = [
+  ['line_matched',      'Line matched',       'var(--s-line)',      'Exact payment set recovered.'],
+  ['line_equivalent',   'Line equivalent',    'var(--s-equiv)',     'Same amounts, indistinguishable ids — zero-MDR UPI payments of equal value. Cash attribution is provably identical.'],
+  ['cash_matched',      'Cash matched',       'var(--s-cash)',      'Attributed to the right settlement; its payment breakup was never issued, so the line detail is left open rather than guessed.'],
+  ['correct_abstention','Correct abstention', 'var(--s-abstain)',   'Should not have been matched, and was not — orphan receipts, duplicate bank postings, genuine ambiguities.'],
+  ['missed',            'Missed',             'var(--st-warning)',  'Resolvable, but the engine left it open.', '#1a1a19'],
+  ['false_match',       'False match',        'var(--st-critical)', 'Posted against the wrong payments. The number that costs real money.'],
+];
+const OC = Object.fromEntries(OUTCOMES.map(o => [o[0], o]));
+const ORD = ['var(--ord-1)','var(--ord-2)','var(--ord-3)','var(--ord-4)','var(--ord-5)'];
+const TIERS = ['T0-SOURCE','T0-UTR','T1-ADVICE','T2-SUBSET','T2B-CASH','T3-ADJUDICATOR','T4-GROUP'];
+const TIER_WHAT = {
+  'T0-SOURCE':'Is this credit a gateway settlement at all? Asked first, because asking it last let subset-sum invent settlements out of customer transfers.',
+  'T0-UTR':'Lookup on the bank reference. Zero inference, microseconds.',
+  'T1-ADVICE':'Settlement advice whose net equals the credit, including split payouts.',
+  'T2-SUBSET':'Exact subset-sum over open payments, net of MDR and GST.',
+  'T2B-CASH':'Identifies the settlement, then spends one budgeted API call to buy back its payment breakup.',
+  'T3-ADJUDICATOR':'Reads the narration. Runs last, rarely, and may abstain.',
+  'T4-GROUP':'Solves a day\u2019s credits as one exact-cover partition. Off by default \u2014 it has never proved a unique partition on realistic pools.',
+};
+
+let DATA = null;
+
+function kpi(label, value, sub, colour){
+  return `<div class="card p-4">
+    <div class="muted text-[10.5px] uppercase tracking-wide">${esc(label)}</div>
+    <div class="text-[27px] font-semibold leading-tight mt-1 num"
+         style="${colour?`color:${colour}`:''}">${value}</div>
+    <div class="muted text-[11.5px] mt-0.5 leading-snug">${sub}</div>
+  </div>`;
+}
+
+function render(d){
+  DATA = d;
+  const m = d.metrics, b = d.batch;
+
+  $('#strip').innerHTML = [
+    ['Batch', b.id], ['Payments', b.payments.toLocaleString('en-IN')],
+    ['Bank credits', b.credits], ['Refunds', b.refunds],
+    ['Chargebacks', b.chargebacks],
+    ['Merchant advices', `${b.advices}<span class="muted"> of ${b.gateway_settlements} on gateway · ${b.advices_with_breakup} with breakup</span>`],
+    ['Credited', b.credited_display],
+  ].map(([k,v]) => `<span><span class="muted">${k}</span> <span class="num font-medium">${v}</span></span>`).join('');
+
+  const fpColour = m.false_matches ? 'var(--st-critical)' : 'var(--st-good)';
+  $('#kpis').innerHTML = [
+    kpi('Cash precision', pctv(m.cash_precision),
+        `${m.cash_correct} of ${m.posted} posted matches correct`,
+        m.cash_precision >= 0.99 ? 'var(--st-good)' : null),
+    kpi('Cash recall', pctv(m.cash_recall),
+        `${m.cash_correct} of ${m.resolvable} resolvable credits`,
+        m.cash_recall >= 0.95 ? 'var(--st-good)' : null),
+    kpi('Line recall', pctv(m.line_recall),
+        `exact payment sets · ${pctv(m.line_recall_effective)} incl. equivalents`),
+    kpi('Wrongly attributed', d.money.false_matched,
+        `${m.false_matches} false match${m.false_matches===1?'':'es'}`, fpColour),
+    kpi('Cost to run', `${d.gateway.spent}<span class="text-[15px] muted"> api</span>  ${m.llm_calls}<span class="text-[15px] muted"> llm</span>`,
+        `of ${d.gateway.budget} API budget · ${m.llm_tokens.toLocaleString('en-IN')} tokens · ${m.total_credits} credits`),
+  ].join('');
+
+  // ── outcome bar ──────────────────────────────────────────────
+  $('#ob-total').textContent = m.total_credits;
+  const counts = {};
+  for (const v of m.verdicts) counts[v.label] = (counts[v.label]||0)+1;
+  $('#outcomebar').innerHTML = OUTCOMES.filter(o => counts[o[0]]).map(([k,label,col,why]) => {
+    const n = counts[k], share = n/m.total_credits;
+    const ink = OC[k][4] || '#ffffff';
+    return `<div class="seg flex items-center justify-center font-medium text-[12px]"
+      data-k="${k}" style="flex:${n} 1 0;background:${col};color:${ink};min-width:22px"
+      >${share > 0.055 ? n : ''}</div>`;
+  }).join('');
+  $('#outcomebar').querySelectorAll('[data-k]').forEach(el => {
+    const [k,label,col,why] = OC[el.dataset.k];
+    bindTip(el, `<b>${label}</b> — ${counts[k]} credits<br>${why}`);
+  });
+  $('#outcomelegend').innerHTML = OUTCOMES.filter(o => counts[o[0]]).map(([k,label,col,why]) =>
+    `<div class="flex items-start gap-2">
+       <span class="seg shrink-0 mt-[3px]" style="width:11px;height:11px;background:${col}"></span>
+       <span><span class="font-medium">${label}</span>
+         <span class="num muted">· ${counts[k]}</span>
+         <span class="muted block text-[11px] leading-snug">${why}</span></span>
+     </div>`).join('');
+
+  // ── tier funnel ──────────────────────────────────────────────
+  const maxPosted = Math.max(1, ...TIERS.map(t => (m.per_tier[t]?.posted)||0));
+  $('#funnel').innerHTML = TIERS.map((t,i) => {
+    const x = m.per_tier[t] || {posted:0,exceptions:0,precision_pct:0,amount_display:'₹0.00'};
+    const w = (x.posted/maxPosted*100).toFixed(1);
+    return `<div data-t="${t}">
+      <div class="flex items-baseline justify-between text-[12px] mb-1">
+        <span class="font-medium">${t}</span>
+        <span class="muted num">${x.posted} posted · ${x.exceptions} exception${x.exceptions===1?'':'s'} · ${x.amount_display}</span>
+      </div>
+      <div style="height:9px;background:var(--grid);border-radius:4px">
+        <div class="seg" style="width:${w}%;height:9px;background:${ORD[i]}"></div>
+      </div></div>`;
+  }).join('');
+  $('#funnel').querySelectorAll('[data-t]').forEach(el => {
+    const t = el.dataset.t, x = m.per_tier[t];
+    bindTip(el, `<b>${t}</b><br>${TIER_WHAT[t]}<br>` +
+      (x ? `posted ${x.posted} · precision ${x.precision_pct}% · ${x.amount_display}`
+         : 'no credits reached this tier'));
+  });
+
+  // ── per scenario ─────────────────────────────────────────────
+  $('#scenarios').innerHTML = Object.entries(m.per_scenario).map(([name,s]) => {
+    const bad = s.false_match ? 'var(--st-critical)' : (s.missed ? 'var(--st-warning)' : '');
+    const segs = OUTCOMES.filter(o => s[o[0]]).map(([k,,col]) =>
+      `<span class="seg" style="flex:${s[k]} 1 0;height:9px;background:${col}"></span>`).join('');
+    return `<tr style="border-bottom:1px solid var(--grid)">
+      <td class="py-[7px] pr-3 font-medium" style="${bad?`color:${bad}`:''}">${name}</td>
+      <td class="py-[7px] px-2 text-right muted">${s.total}</td>
+      <td class="py-[7px] px-2 text-right">${s.line_matched||'·'}</td>
+      <td class="py-[7px] px-2 text-right">${s.line_equivalent||'·'}</td>
+      <td class="py-[7px] px-2 text-right">${s.cash_matched||'·'}</td>
+      <td class="py-[7px] px-2 text-right">${s.correct_abstention||'·'}</td>
+      <td class="py-[7px] px-2 text-right" style="${s.missed?'color:var(--st-warning)':''}">${s.missed||'·'}</td>
+      <td class="py-[7px] px-2 text-right" style="${s.false_match?'color:var(--st-critical)':''}">${s.false_match||'·'}</td>
+      <td class="py-[7px] pl-3">
+        <div class="flex items-center gap-2">
+          <div class="flex gap-[2px] flex-1" style="min-width:96px">${segs}</div>
+          <span class="muted w-[46px] text-right">${s.resolvable? s.cash_recall_pct.toFixed(0)+'%' : '—'}</span>
+        </div></td></tr>`;
+  }).join('');
+
+  // ── exceptions ───────────────────────────────────────────────
+  const rc = Object.fromEntries(d.reason_codes.map(c => [c.code, c]));
+  $('#exceptions').innerHTML = m.exceptions.length ? m.exceptions.map(e => {
+    const c = rc[e.code] || {title:e.code, owner:'—', next_action:'—', severity:'warn'};
+    const good = e.correct_to_abstain === e.count;
+    const chip = good ? 'var(--st-good)' : 'var(--st-warning)';
+    return `<div class="p-3.5 rounded-lg" style="border:1px solid var(--grid)">
+      <div class="flex flex-wrap items-baseline justify-between gap-2">
+        <div class="flex items-baseline gap-2.5">
+          <span class="font-semibold text-[13px]">${e.code}</span>
+          <span class="num muted text-[12px]">×${e.count} · ${e.amount_display}</span>
+        </div>
+        <span class="text-[11px] px-2 py-[3px] rounded-full font-medium"
+              style="background:${chip};color:#fff">
+          ${good?'✓ ':''}${e.correct_to_abstain}/${e.count} correct to abstain
+        </span>
+      </div>
+      <div class="sec text-[12.5px] mt-1.5">${esc(c.title)}</div>
+      <div class="muted text-[11.5px] mt-1">
+        <span class="font-medium">${esc(c.owner)}</span> · ${esc(c.next_action)}
+      </div>
+      <div class="muted text-[11px] mt-1 num">${e.examples.join(', ')}</div>
+    </div>`;
+  }).join('') : `<p class="muted text-[12.5px]">Empty — every credit was resolved.</p>`;
+
+  // ── ledger ───────────────────────────────────────────────────
+  const L = d.ledger, ok = L.balanced;
+  const rows = Object.entries(L.balances).filter(([,v]) => v)
+    .map(([k,v]) => `<div class="flex justify-between gap-4 py-[3px]"
+        style="border-bottom:1px solid var(--grid)">
+        <span class="sec">${k.replace(/_/g,' ')}${k==='suspense'
+          ? ' <span class="muted text-[11px]">— cash received, not yet explained</span>':''}</span>
+        <span class="font-medium">${d.ledger_display[k]}</span></div>`).join('');
+  $('#ledger').innerHTML = `
+    <div><div class="flex items-center gap-2 mb-2">
+      <span class="text-[11px] px-2 py-[3px] rounded-full font-medium"
+        style="background:${ok?'var(--st-good)':'var(--st-critical)'};color:#fff">
+        ${ok?'✓ BALANCED':'✕ IMBALANCED'}</span>
+      <span class="muted text-[11.5px]">${L.postings.toLocaleString('en-IN')} postings</span>
+    </div>${rows}</div>
+    <div class="text-[12px] sec leading-relaxed">
+      Unattributed cash is parked in <b>suspense</b>, never forced into the clearing
+      account. Its closing balance — <b>${d.money.suspense}</b> — is exactly the money
+      received but not yet explained, and it is the first figure a controller looks at.
+      <div class="muted mt-2">
+        debits ${(L.total_debits_paise/100).toLocaleString('en-IN',{style:'currency',currency:'INR'})}
+        · credits ${(L.total_credits_paise/100).toLocaleString('en-IN',{style:'currency',currency:'INR'})}
+      </div>
+    </div>`;
+
+  const gw = d.gateway, gr = d.group;
+  $('#footnote').innerHTML =
+    `${m.posted - (d.llm.calls?countLLM():0)} of ${m.total_credits} credits resolved without a token. ` +
+    `Adjudicator model: ${esc(d.llm.model)}` +
+    (d.llm.enabled ? '' : ` <span style="color:var(--st-warning)">(disabled — ${esc(d.llm.disabled_reason)})</span>`) +
+    ` · lookback ${d.config.lookback_days}d · confidence floor ${d.config.confidence_floor}` +
+    ` · subset budget ${d.config.subset_budget_ms}ms.` +
+    `<br>Gateway: ${gw.spent}/${gw.budget} calls spent, ${gw.refused} refused past budget. ` +
+    (gr.enabled === false
+      ? `Exact-cover group pass off by default \u2014 on realistic pools it has never proved a unique partition.`
+      : `Group pass: ${gr.groups_considered} considered, ${gr.groups_solved} solved, ${gr.credits_upgraded} upgraded, ${gr.ambiguous_groups} proven ambiguous.`);
+
+  renderCredits();
+  $('#app').classList.remove('hidden');
+}
+
+function countLLM(){ return DATA.credits.filter(c => c.tier==='T3-ADJUDICATOR' && c.outcome==='matched').length; }
+
+function renderCredits(){
+  const q = $('#filter').value.toLowerCase().trim();
+  const only = $('#only').value;
+  const rows = DATA.credits.filter(c => {
+    if (only && c.label !== only) return false;
+    if (!q) return true;
+    return [c.bank_txn_id, c.tier, c.scenario, c.reason_code, c.strategy, c.narration]
+      .join(' ').toLowerCase().includes(q);
+  });
+  $('#creditcount').textContent =
+    `${rows.length} of ${DATA.credits.length} credits shown · ${DATA.audit.length} audit records in this batch`;
+
+  $('#credits').innerHTML = rows.map(c => {
+    const [,label,col] = OC[c.label];
+    const trail = c.trail.map(t => `
+      <div class="flex gap-3 py-[5px]" style="border-bottom:1px solid var(--grid)">
+        <span class="num font-medium shrink-0 w-[112px]">${t.tier}</span>
+        <span class="shrink-0 w-[78px] muted">${t.outcome}</span>
+        <span class="shrink-0 w-[168px] num muted">${esc(t.strategy)}</span>
+        <span class="sec flex-1">${esc(t.why)}</span>
+        <span class="muted num shrink-0">${t.elapsed_ms}ms</span>
+      </div>`).join('');
+    const ev = Object.entries(c.evidence||{}).filter(([k]) => k!=='why' && k!=='windows_tried')
+      .map(([k,v]) => `<span class="muted">${esc(k)}</span> <span class="num">${esc(
+        typeof v==='object'? JSON.stringify(v).slice(0,140) : v)}</span>`).join(' &nbsp;·&nbsp; ');
+    return `<tr class="row-hit" style="border-bottom:1px solid var(--grid)"
+              onclick="this.nextElementSibling.hidden=!this.nextElementSibling.hidden">
+        <td class="py-[7px] pr-3 num">${c.bank_txn_id}</td>
+        <td class="py-[7px] px-2 num muted">${c.value_date}</td>
+        <td class="py-[7px] px-2 num text-right font-medium">${c.amount_display}</td>
+        <td class="py-[7px] px-2 muted">${c.scenario}</td>
+        <td class="py-[7px] px-2 num">${c.tier}</td>
+        <td class="py-[7px] px-2 num text-right muted">${c.confidence ? c.confidence.toFixed(2) : '—'}</td>
+        <td class="py-[7px] pl-2">
+          <span class="inline-flex items-center gap-1.5">
+            <span class="seg" style="width:9px;height:9px;background:${col}"></span>
+            <span>${label}</span>
+            ${c.reason_code?`<span class="muted num text-[11px]">${c.reason_code}</span>`:''}
+          </span></td></tr>
+      <tr hidden><td colspan="7" class="px-3 pb-4 pt-1">
+        <div class="rounded-lg p-3.5 text-[11.5px]" style="background:var(--page)">
+          <div class="muted mb-2">${esc(c.narration)}</div>
+          ${trail}
+          ${ev?`<div class="mt-2.5 leading-relaxed">${ev}</div>`:''}
+          <div class="mt-2 muted">
+            predicted ${c.predicted_count} payments · ground truth ${c.expected_count}
+            ${c.truth_note?` · <i>${esc(c.truth_note)}</i>`:''}
+          </div>
+        </div></td></tr>`;
+  }).join('');
+}
+
+const rupees = p => (p<0?'-':'') + '\u20b9' +
+  Math.abs(p/100).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+
+let RES = {}, ACTIONS = {};
+
+async function loadResolutions(){
+  try{
+    const r = await fetch('/api/resolutions?seed=' + $('#seed').value);
+    if(!r.ok) return;
+    const d = await r.json();
+    RES = d.resolutions || {}; ACTIONS = d.actions || {};
+  }catch(e){ RES = {}; }
+}
+
+async function saveResolution(id){
+  const action = document.querySelector(`select[data-res="${id}"]`).value;
+  const note = document.querySelector(`input[data-note="${id}"]`).value;
+  const body = {seed:+$('#seed').value, bank_txn_id:id, action, note,
+                resolved_by:'dashboard'};
+  const r = await fetch('/api/resolve', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  if(!r.ok){ alert('Could not save: ' + await r.text()); return; }
+  await loadResolutions(); renderReview();
+}
+
+async function clearResolution(id){
+  await fetch(`/api/resolve/${id}?seed=${$('#seed').value}`, {method:'DELETE'});
+  await loadResolutions(); renderReview();
+}
+
+function renderReview(){
+  if(!DATA) return;
+  const open = DATA.credits.filter(c => c.outcome !== 'matched');
+  if(!open.length){
+    $('#review').innerHTML = '<p class="muted text-[12.5px]">Nothing to review — '
+      + 'every credit was resolved by the engine.</p>';
+    return;
+  }
+  const opts = Object.entries(ACTIONS);
+  $('#review').innerHTML = open.map(c => {
+    const r = RES[c.bank_txn_id];
+    const done = !!r;
+    return `<div class="p-3.5 rounded-lg" style="border:1px solid var(--grid);
+        ${done?'background:var(--page)':''}">
+      <div class="flex flex-wrap items-baseline justify-between gap-2">
+        <div class="flex items-baseline gap-2.5">
+          <span class="num font-semibold text-[12.5px]">${c.bank_txn_id}</span>
+          <span class="num muted text-[12px]">${c.amount_display} · ${c.value_date}</span>
+          ${c.reason_code?`<span class="num text-[11px] muted">${c.reason_code}</span>`:''}
+        </div>
+        ${done?`<span class="text-[11px] px-2 py-[3px] rounded-full font-medium"
+             style="background:var(--st-good);color:#fff">✓ cleared by hand</span>`:''}
+      </div>
+      <div class="muted text-[11.5px] mt-1">${esc(c.narration)}</div>
+      ${done ? `<div class="text-[11.5px] mt-2 sec">
+            ${esc(r.action_label)}${r.note?` — ${esc(r.note)}`:''}
+            <span class="muted">· ${esc(r.resolved_by)} · ${esc(r.resolved_at)}</span>
+          </div>
+          <button onclick="clearResolution('${c.bank_txn_id}')"
+            class="mt-2 text-[11.5px] px-2.5 py-1 rounded card">Undo</button>`
+        : `<div class="flex flex-wrap gap-2 mt-2.5 items-center">
+            <select data-res="${c.bank_txn_id}"
+              class="card px-2 py-1.5 text-[12px] bg-transparent">
+              ${opts.map(([k,v]) => `<option value="${k}">${esc(v)}</option>`).join('')}
+            </select>
+            <input data-note="${c.bank_txn_id}" placeholder="note (optional)"
+              class="card px-2.5 py-1.5 text-[12px] bg-transparent flex-1 min-w-[180px]">
+            <button onclick="saveResolution('${c.bank_txn_id}')"
+              class="text-[12px] px-3 py-1.5 rounded font-medium"
+              style="background:var(--s-line);color:var(--page)">Resolve</button>
+          </div>`}
+    </div>`;
+  }).join('');
+}
+
+async function loadForecast(){
+  try{
+    const p = new URLSearchParams({seed:$('#seed').value,
+                                  payments:$('#payments').value, days:21});
+    const r = await fetch('/api/forecast?'+p);
+    if(!r.ok) throw new Error(await r.text());
+    const f = await r.json();
+    if(!f.days.length){
+      $('#forecast').innerHTML = '<p class="muted text-[12.5px]">Nothing outstanding — '
+        + 'every capture has reached its payout date.</p>';
+      return;
+    }
+    const rows = f.days.map(d => `<tr style="border-top:1px solid var(--grid)">
+        <td class="py-[7px] num">${d.payout_date}</td>
+        <td class="py-[7px] num text-right">${d.payments}</td>
+        <td class="py-[7px] num text-right">${rupees(d.gross_paise)}</td>
+        <td class="py-[7px] num text-right muted">${rupees(d.mdr_paise+d.gst_paise)}</td>
+        <td class="py-[7px] num text-right muted">${rupees(d.refunds_paise)}</td>
+        <td class="py-[7px] num text-right muted">${rupees(d.chargebacks_paise)}</td>
+        <td class="py-[7px] num text-right font-semibold"
+            style="color:${d.expected_paise<0?'var(--st-critical)':'var(--st-good)'}">
+          ${rupees(d.expected_paise)}</td></tr>`).join('');
+    $('#forecast').innerHTML = `
+      <div class="muted text-[11.5px] mb-2">as of ${f.as_of} · settlement lag T+${f.lag_days}</div>
+      <div style="overflow-x:auto"><table class="w-full text-[12.5px]">
+        <thead class="muted text-[11.5px]"><tr>
+          <th class="text-left font-medium pb-1">payout date</th>
+          <th class="text-right font-medium pb-1">pays</th>
+          <th class="text-right font-medium pb-1">gross</th>
+          <th class="text-right font-medium pb-1">fees+GST</th>
+          <th class="text-right font-medium pb-1">refunds</th>
+          <th class="text-right font-medium pb-1">chargebacks</th>
+          <th class="text-right font-medium pb-1">expected</th>
+        </tr></thead><tbody>${rows}</tbody>
+        <tfoot><tr style="border-top:2px solid var(--grid)">
+          <td class="py-2 font-semibold">total</td>
+          <td class="py-2 num text-right">${f.payments}</td>
+          <td colspan="4"></td>
+          <td class="py-2 num text-right font-bold">${rupees(f.total_paise)}</td>
+        </tr></tfoot>
+      </table></div>`;
+  }catch(e){
+    $('#forecast').innerHTML = '<p class="muted text-[12.5px]">Forecast unavailable: '
+      + esc(e.message) + '</p>';
+  }
+}
+
+async function load(){
+  $('#app').classList.add('hidden'); $('#err').classList.add('hidden');
+  $('#loading').classList.remove('hidden');
+  const llm = $('#llm').checked;
+  $('#loadnote').textContent = llm
+    ? 'Tier 3 is on — the adjudicator runs on the residue, which takes a few seconds per escalated credit.'
+    : 'deterministic tiers only';
+  const p = new URLSearchParams({seed:$('#seed').value, payments:$('#payments').value,
+                                days:21, llm, gateway:$('#gateway').value});
+  try{
+    const r = await fetch('/api/run?'+p);
+    if(!r.ok) throw new Error(await r.text());
+    render(await r.json());
+    await loadResolutions(); renderReview(); loadForecast();
+  }catch(e){
+    $('#err').textContent = 'Run failed: ' + e.message;
+    $('#err').classList.remove('hidden');
+  }finally{ $('#loading').classList.add('hidden'); }
+}
+
+$('#go').onclick = load;
+$('#filter').oninput = () => DATA && renderCredits();
+$('#only').onchange = () => DATA && renderCredits();
+$('#theme').onclick = () => {
+  const cur = document.documentElement.getAttribute('data-theme');
+  const next = cur === 'dark' ? 'light' : cur === 'light' ? '' : 'dark';
+  if (next) document.documentElement.setAttribute('data-theme', next);
+  else document.documentElement.removeAttribute('data-theme');
+};
+load();
+</script>
+</body>
+</html>
